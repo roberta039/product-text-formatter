@@ -58,6 +58,8 @@ BANNED_KEYS = {
     "catalog page number",
     "bar code",
     "barcode",
+    "package",
+    "pachet",
 }
 
 def is_banned_key(key: str) -> bool:
