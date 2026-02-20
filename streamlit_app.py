@@ -32,7 +32,8 @@ BANNED_KEYS = {
     "tara de origine","country of origin",
     "cod unic de inregistrare","cod unic de înregistrare",
     "cod","code","cod articol","article code",
-    "model","marca","marcă","brand",
+    "model",
+    "marca","marcă","brand",
     "numarul paginii din catalog","catalog page number","catalogue page number",
     "cod de bare","bar code","barcode",
     "nume in catalog",
@@ -45,8 +46,14 @@ def is_banned_key(key: str) -> bool:
     banned_norm = {norm_key(x) for x in BANNED_KEYS}
     if k in banned_norm:
         return True
-    banned_sub = ["tara de origine","country of origin","catalogue","catalog","cod unic","numarul paginii din catalog",
-                  "cod de bare","bar code","barcode","cod articol","article code","engraving","gravare"]
+    banned_sub = [
+        "tara de origine","country of origin",
+        "catalogue","catalog",
+        "cod unic","numarul paginii din catalog",
+        "cod de bare","bar code","barcode",
+        "cod articol","article code",
+        "engraving","gravare",
+    ]
     return any(s in k for s in banned_sub)
 
 KEY_MAP = {
@@ -67,7 +74,7 @@ def translate_to_ro(text: str) -> str:
         return text
 
 EN_HINT = {"pocket","zip","zippers","lock","water-repellent","waterproof","recycled","certified","anti-theft",
-           "black","grey","gray","leather","strap","laptop","tablet","airport","work","class","lining"}
+           "black","grey","gray","leather","strap","laptop","tablet","airport","work","class","lining","volume","litres","liters"}
 
 def looks_english(text: str) -> bool:
     t = (text or "").strip()
@@ -108,12 +115,10 @@ def polish_ro(text: str) -> str:
     t = re.sub(r"\banti[- ]theft\b","antifurt",t,flags=re.IGNORECASE)
     t = re.sub(r"\brpet\b","RPET",t,flags=re.IGNORECASE)
     t = re.sub(r"\bgrs\b","GRS",t,flags=re.IGNORECASE)
-    # remove accidental repeated "Descriere" header inside the body
     t = re.sub(r"^\s*Descriere\s*\n+", "", t, flags=re.IGNORECASE)
     return t
 
 def drop_hallucinated_title(desc: str) -> str:
-    """If translator adds a short 'title' line before the real paragraph, drop it."""
     d = (desc or "").strip()
     if "\n" not in d:
         return d
@@ -121,35 +126,16 @@ def drop_hallucinated_title(desc: str) -> str:
     first = first.strip()
     rest2 = rest.strip()
     if 0 < len(first) <= 90 and not first.endswith((".", "!", "?")):
-        # if rest starts with a typical Romanian sentence, drop first line
         if re.match(r"^(Fabricat|Realizat|Conceput|Rucsacul|Acest|Aceasta|Cu)\b", rest2, flags=re.IGNORECASE):
             return rest2
     return d
 
+# ----------------- parsing -----------------
 KNOWN_KEYS = {
     "brand","material","colour","color","length","width","height","weight","country of origin","engraving color",
     "marca","material","culoare","lungime","latime","inaltime","greutate","tara de origine","culoare de gravare"
 }
 KNOWN_KEYS_NORM = {norm_key(x) for x in KNOWN_KEYS}
-
-def parse_description_and_tail(raw_lines: list[str]) -> tuple[str, list[str]]:
-    """
-    Input starts with 'Description' or 'Descriere'.
-    Returns (description_text, tail_lines_starting_with_first_key)
-    """
-    lines = [ln.rstrip() for ln in raw_lines]
-    # skip header line
-    i = 1
-    desc_lines = []
-    while i < len(lines):
-        s = lines[i].strip()
-        if s and norm_key(s) in KNOWN_KEYS_NORM:
-            break
-        desc_lines.append(lines[i])
-        i += 1
-    description = "\n".join(desc_lines).strip()
-    tail = [ln.strip() for ln in lines[i:] if ln.strip()]
-    return description, tail
 
 def parse_vertical_kvs(lines: list[str]):
     out=[]
@@ -167,6 +153,39 @@ def parse_vertical_kvs(lines: list[str]):
         dedup[norm_key(k)] = (k,v)
     return list(dedup.values())
 
+def split_description_then_kvs(lines: list[str]) -> tuple[str, list[str]]:
+    """
+    Works for:
+    - starts with 'Description' header
+    - OR starts directly with a long paragraph, then vertical keys.
+    Returns (description, tail_lines_from_first_key)
+    """
+    clean = [ln.strip() for ln in lines if ln.strip()]
+    if not clean:
+        return "", []
+    # Case A: explicit header
+    if norm_key(clean[0]) in {norm_key("description"), norm_key("descriere")}:
+        i = 1
+        desc_lines=[]
+        while i < len(clean) and norm_key(clean[i]) not in KNOWN_KEYS_NORM:
+            desc_lines.append(clean[i])
+            i += 1
+        return "\n".join(desc_lines).strip(), clean[i:]
+    # Case B: no header; find first known key line that has a value after it
+    i = 0
+    first_key_idx = None
+    while i < len(clean)-1:
+        if norm_key(clean[i]) in KNOWN_KEYS_NORM:
+            first_key_idx = i
+            break
+        i += 1
+    if first_key_idx is not None:
+        desc = "\n".join(clean[:first_key_idx]).strip()
+        tail = clean[first_key_idx:]
+        return desc, tail
+    # fallback: everything is description
+    return "\n".join(clean).strip(), []
+
 def build_output(description: str, kv_lines: list[str]) -> str:
     parts=[]
     if description:
@@ -180,23 +199,19 @@ def process_input(raw_text: str):
     raw = normalize(raw_text).strip()
     if not raw:
         return "", "unknown"
-    raw_lines = [ln.rstrip() for ln in raw.split("\n") if ln.strip()]
 
-    description = ""
-    kv_pairs = []
-    detected = "unknown"
+    raw_lines = raw.split("\n")
+    description, tail = split_description_then_kvs(raw_lines)
 
-    if raw_lines and norm_key(raw_lines[0]) in {norm_key("description"), norm_key("descriere")}:
-        description, tail = parse_description_and_tail(raw_lines)
-        kvs = parse_vertical_kvs(tail)
-        for k,v in kvs:
+    kv_pairs=[]
+    if tail:
+        for k,v in parse_vertical_kvs(tail):
             k_ro = map_key_to_ro(k)
             if is_banned_key(k) or is_banned_key(k_ro):
                 continue
             kv_pairs.append((k_ro, v))
-    else:
-        description = raw
 
+    detected="unknown"
     if description:
         description, detected = maybe_translate_to_ro(description)
         description = polish_ro(description)
