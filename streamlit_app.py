@@ -31,7 +31,7 @@ def extract_section(text: str, header: str):
     """
     t = normalize(text)
     lines = t.split("\n")
-    # find header line index (case-insensitive)
+
     idx = None
     for i, ln in enumerate(lines):
         if ln.strip().lower() == header.strip().lower():
@@ -40,12 +40,9 @@ def extract_section(text: str, header: str):
     if idx is None:
         return None
 
-    # section starts after header line
     start = idx + 1
 
-    # heuristic: next header is a line that has no ":" and length <= 40 and has letters,
-    # OR is exactly one of known headers
-    known = {"informatii de baza", "descriere", "caracteristici cheie", "caracteristici", "specificatii"}
+    known = {"informatii de baza", "informații de bază", "descriere", "caracteristici cheie", "caracteristici", "specificatii", "product specific details"}
     end = len(lines)
     for j in range(start, len(lines)):
         s = lines[j].strip()
@@ -55,8 +52,7 @@ def extract_section(text: str, header: str):
         if low in known:
             end = j
             break
-        if (":" not in s) and (len(s) <= 40) and re.search(r"[A-Za-zĂÂÎȘȚăâîșț]", s):
-            # looks like a heading
+        if (":" not in s) and ("\t" not in s) and (len(s) <= 40) and re.search(r"[A-Za-zĂÂÎȘȚăâîșț]", s):
             end = j
             break
 
@@ -64,9 +60,7 @@ def extract_section(text: str, header: str):
     return section if section else ""
 
 def parse_key_values(block: str):
-    """
-    Parse lines like 'Cod: 34.711.10' into list of (key, value)
-    """
+    """Parse lines like 'Cod: 34.711.10' into list of (key, value)"""
     if not block:
         return []
     out = []
@@ -83,32 +77,52 @@ def parse_key_values(block: str):
     return out
 
 def parse_bullets_or_list(block: str):
-    """
-    Parse '• item • item' OR lines containing bullets into list of items.
-    """
+    """Parse '• item • item' OR lines containing bullets into list of items."""
     if not block:
         return []
     b = normalize(block).strip()
-
-    # turn newlines into spaces to catch "•" inline lists
     b = re.sub(r"\n+", " ", b)
 
     if "•" in b:
         parts = [p.strip(" \t-•") for p in b.split("•")]
         return [p for p in parts if p]
 
-    # fallback: split by " , " or ";" if looks like a list
     if "," in b:
         parts = [p.strip() for p in b.split(",")]
         return [p for p in parts if p]
 
-    # last fallback: one item
     return [b] if b else []
 
+def parse_tab_kvs(text: str):
+    """
+    Parse lines like:
+    Cheie<TAB>Valoare
+    Cheie    Valoare (2+ spaces)
+    """
+    if not text:
+        return []
+    out = []
+    for ln in normalize(text).split("\n"):
+        ln = ln.strip()
+        if not ln:
+            continue
+
+        if ln.lower() in {"product specific details", "informatii de baza", "informații de bază", "descriere", "caracteristici cheie"}:
+            continue
+
+        if "\t" in ln:
+            parts = [p.strip() for p in ln.split("\t") if p.strip()]
+        else:
+            parts = [p.strip() for p in re.split(r"\s{2,}", ln) if p.strip()]
+
+        if len(parts) >= 2:
+            key = parts[0]
+            value = " ".join(parts[1:]).strip()
+            if key and value:
+                out.append((key, value))
+    return out
+
 def guess_title(kvs):
-    """
-    Prefer: 'Rucsac' + Model if exists, else Model, else first strong identifier.
-    """
     model = None
     marca = None
     for k, v in kvs:
@@ -131,7 +145,7 @@ def build_formatted(title: str, description: str, characteristics_lines: list[st
     if title:
         parts += [title, ""]
     if description:
-        parts += [description.strip(), ""]
+        parts += [description, ""]
     if characteristics_lines:
         parts.append("Caracteristici:")
         for ln in characteristics_lines:
@@ -145,43 +159,60 @@ def build_formatted(title: str, description: str, characteristics_lines: list[st
     return ("\n".join(parts).strip() + "\n") if parts else ""
 
 # ----------------- UI -----------------
-st.title("Formatare text produs (input brut -> output ca in catalog, fara diacritice)")
+st.title("Formatare text produs (input brut / tabel -> output formatat, fara diacritice)")
 
 raw = st.text_area(
-    "Lipeste aici textul brut (ex: Informatii de baza / Descriere / Caracteristici cheie)",
+    "Lipeste aici textul brut (accepta: Informatii de baza/Descriere/Caracteristici cheie sau tabel cu TAB-uri)",
     height=320,
 )
 
 remove = st.checkbox("Elimina diacritice", value=True)
-include_basic_info = st.checkbox("Include 'Informatii de baza' in Caracteristici", value=True)
-include_key_features = st.checkbox("Include 'Caracteristici cheie' in Caracteristici", value=True)
+include_basic_info = st.checkbox("Include 'Informatii de baza' in Caracteristici (format pe sectiuni)", value=True)
+include_key_features = st.checkbox("Include 'Caracteristici cheie' in Caracteristici (format pe sectiuni)", value=True)
 
 title_override = st.text_input("Titlu (optional, daca vrei sa il fortezi)", placeholder="(lasa gol pentru auto)")
 
-# ----------------- Parse & build -----------------
-basic = extract_section(raw, "Informații de bază") or extract_section(raw, "Informatii de baza") or ""
-desc = extract_section(raw, "Descriere") or ""
-keyf = extract_section(raw, "Caracteristici cheie") or ""
+raw_norm = normalize(raw)
 
-kvs = parse_key_values(basic)
-title_auto = guess_title(kvs)
+tab_lines = sum(1 for ln in raw_norm.split("\n") if "\t" in ln)
+is_tabular = tab_lines >= 2
 
+title_final = ""
+desc_text = ""
 characteristics = []
 
-if include_basic_info:
-    # Keep same order as in input
-    for k, v in kvs:
+if is_tabular:
+    kvs_tab = parse_tab_kvs(raw_norm)
+    data = {k.strip().lower(): v for k, v in kvs_tab}
+
+    title_final = title_override.strip() if title_override.strip() else data.get("nume produs", "").strip()
+    desc_text = data.get("descriere", "").strip()
+
+    skip_keys = {"nume produs", "descriere"}
+    for k, v in kvs_tab:
+        if k.strip().lower() in skip_keys:
+            continue
         characteristics.append(f"{k}: {v}")
 
-if include_key_features:
-    items = parse_bullets_or_list(keyf)
-    # show each feature as a separate line
-    for it in items:
-        characteristics.append(it)
+else:
+    basic = extract_section(raw, "Informații de bază") or extract_section(raw, "Informatii de baza") or ""
+    desc_text = extract_section(raw, "Descriere") or ""
+    keyf = extract_section(raw, "Caracteristici cheie") or ""
 
-title_final = title_override.strip() if title_override.strip() else title_auto
+    kvs = parse_key_values(basic)
+    title_auto = guess_title(kvs)
+    title_final = title_override.strip() if title_override.strip() else title_auto
 
-formatted = build_formatted(title_final, desc, characteristics)
+    if include_basic_info:
+        for k, v in kvs:
+            characteristics.append(f"{k}: {v}")
+
+    if include_key_features:
+        items = parse_bullets_or_list(keyf)
+        for it in items:
+            characteristics.append(it)
+
+formatted = build_formatted(title_final, desc_text, characteristics)
 if remove:
     formatted = remove_diacritics(formatted)
 
