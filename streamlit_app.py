@@ -40,6 +40,7 @@ BANNED_KEYS = {
     "cod unic de inregistrare",
     "cod unic de înregistrare",
     "cod",
+    "cod articol",
     "model",
     "marca",
     "marcă",
@@ -54,6 +55,7 @@ BANNED_KEYS = {
     "catalogue",
     "catalog",
     "code",
+    "article code",
     "brand",
     "catalogue page number",
     "catalog page number",
@@ -73,9 +75,11 @@ def is_banned_key(key: str) -> bool:
         "cod unic",
         "numarul paginii din catalog", "catalog page number", "catalogue page number",
         "cod de bare", "bar code", "barcode",
+        "cod articol", "article code",
     ]
     return any(s in k for s in banned_sub) or k in {
-        norm_key("cod"), norm_key("code"), norm_key("model"), norm_key("marca"), norm_key("brand"), norm_key("package"), norm_key("pachet")
+        norm_key("cod"), norm_key("code"), norm_key("model"), norm_key("marca"), norm_key("brand"),
+        norm_key("package"), norm_key("pachet"), norm_key("cod articol"), norm_key("article code")
     }
 
 # Map common keys to Romanian (for nicer output)
@@ -110,7 +114,6 @@ def map_key_to_ro(key: str) -> str:
 def detect_lang_safe(text: str) -> str:
     try:
         sample = re.sub(r"\s+", " ", (text or "")).strip()
-        # langdetect is unreliable on very short strings
         if len(sample) < 35:
             return "unknown"
         return detect(sample)
@@ -137,18 +140,13 @@ def looks_english_or_foreign_short(text: str) -> bool:
     if not t:
         return False
     low = remove_diacritics(t).lower()
-    # any typical English keyword
     if any(re.search(rf"\b{re.escape(w)}\b", low) for w in EN_HINT_WORDS):
         return True
-    # has only ASCII letters and spaces/punct and no Romanian stopwords -> likely EN
     if re.fullmatch(r"[A-Za-z0-9 \-–—,:;\"'()\[\]/\.]+", t) and not re.search(r"\b(si|sau|pentru|cu|din|este)\b", low):
         return True
     return False
 
 def maybe_translate_to_ro(text: str) -> tuple[str, str]:
-    """
-    Translate to Romanian when text is non-RO OR when it's short/unknown but looks English/foreign.
-    """
     t = text or ""
     lang = detect_lang_safe(t)
     if lang not in ("ro", "unknown"):
@@ -158,15 +156,9 @@ def maybe_translate_to_ro(text: str) -> tuple[str, str]:
     return t, lang
 
 def polish_ro_phrasing(text: str) -> str:
-    """
-    Small post-edits to make output more natural and consistent.
-    """
     t = text or ""
-    # normalize quotes
     t = t.replace("”", '"').replace("“", '"').replace("„", '"')
-    # common wording tweaks
     t = re.sub(r"\brucsac de afaceri\b", "rucsac business", t, flags=re.IGNORECASE)
-    t = re.sub(r"\bexecutiv\b", "executiv", t, flags=re.IGNORECASE)
     t = re.sub(r"\bport de tip c\b", "port Type-C", t, flags=re.IGNORECASE)
     t = re.sub(r"\bport type-c\b", "port Type-C", t, flags=re.IGNORECASE)
     t = re.sub(r"\banti[- ]theft\b", "antifurt", t, flags=re.IGNORECASE)
@@ -192,15 +184,8 @@ def extract_section(text: str, headers: list[str]) -> str:
 
     start = idx + 1
     known_headers = [
-        # RO
-        "Informații de bază", "Informatii de baza",
-        "Descriere",
-        "Caracteristici cheie", "Caracteristici",
-        # EN
-        "Basic Information",
-        "Description",
-        "Key features", "Key features:",
-        "Product specific details",
+        "Informații de bază", "Informatii de baza", "Descriere", "Caracteristici cheie", "Caracteristici",
+        "Basic Information", "Description", "Key features", "Key features:", "Product specific details",
     ]
     end = len(lines)
     for j in range(start, len(lines)):
@@ -329,9 +314,9 @@ def process_input(raw_text: str) -> tuple[str, str]:
         description, detected_lang_any = maybe_translate_to_ro(description)
         description = polish_ro_phrasing(description)
 
-        characteristics, detected_lang_any2 = translate_characteristics_lines(characteristics)
+        characteristics, detected2 = translate_characteristics_lines(characteristics)
         if detected_lang_any == "unknown":
-            detected_lang_any = detected_lang_any2
+            detected_lang_any = detected2
 
     else:
         basic = extract_section(raw, ["Informații de bază", "Informatii de baza", "Basic Information"])
@@ -342,44 +327,38 @@ def process_input(raw_text: str) -> tuple[str, str]:
         for k, v in kvs_basic:
             characteristics.append(f"{k}: {v}")
 
-        # bullet items
-        bullets = parse_bullets(keyf)
-        characteristics.extend(bullets)
+        characteristics.extend(parse_bullets(keyf))
 
         description, detected_lang_any = maybe_translate_to_ro(description)
         description = polish_ro_phrasing(description)
 
-        characteristics, detected_lang_any2 = translate_characteristics_lines(characteristics)
+        characteristics, detected2 = translate_characteristics_lines(characteristics)
         if detected_lang_any == "unknown":
-            detected_lang_any = detected_lang_any2
+            detected_lang_any = detected2
 
     formatted = build_formatted(title, description, characteristics)
-
-    # final: always without diacritics (requested)
-    formatted = remove_diacritics(formatted)
+    formatted = remove_diacritics(formatted)  # final output without diacritics
     return formatted, detected_lang_any
 
 # ----------------- UI -----------------
 st.title("Formatare text produs (input brut / tabel -> output formatat, fara diacritice)")
 st.caption("Lipeste textul, apoi apasa **Aranjeaza textul**. Foloseste **Reset** pentru alt produs.")
 
-if "raw_text" not in st.session_state:
-    st.session_state["raw_text"] = ""
+# Reset-safe strategy: use a changing widget key (no direct assignment to widget's session key)
+if "reset_counter" not in st.session_state:
+    st.session_state["reset_counter"] = 0
 if "formatted" not in st.session_state:
     st.session_state["formatted"] = ""
 if "detected_lang" not in st.session_state:
     st.session_state["detected_lang"] = "unknown"
 
-def do_reset():
-    st.session_state["raw_text"] = ""
-    st.session_state["formatted"] = ""
-    st.session_state["detected_lang"] = "unknown"
+widget_key = f"raw_text_{st.session_state['reset_counter']}"
 
 with st.form("formatter_form"):
     st.text_area(
         "Text brut (accepta: sectiuni sau tabel cu TAB-uri)",
         height=320,
-        key="raw_text",
+        key=widget_key,
         placeholder="Lipeste aici textul brut…",
     )
     c1, c2 = st.columns(2)
@@ -389,11 +368,15 @@ with st.form("formatter_form"):
         reset = st.form_submit_button("Reset (text nou)", use_container_width=True)
 
 if reset:
-    do_reset()
+    # increment counter -> creates a new text_area key, empty by default
+    st.session_state["reset_counter"] += 1
+    st.session_state["formatted"] = ""
+    st.session_state["detected_lang"] = "unknown"
     st.rerun()
 
 if submitted:
-    formatted, lang = process_input(st.session_state.get("raw_text", ""))
+    raw_input = st.session_state.get(widget_key, "")
+    formatted, lang = process_input(raw_input)
     st.session_state["formatted"] = formatted
     st.session_state["detected_lang"] = lang
 
