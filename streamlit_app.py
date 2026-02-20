@@ -27,44 +27,6 @@ def norm_key(k: str) -> str:
     k = re.sub(r"\s+"," ",k)
     return k
 
-# ----------------- filters -----------------
-BANNED_KEYS = {
-    "tara de origine","country of origin",
-    "cod unic de inregistrare","cod unic de înregistrare",
-    "cod","code","cod articol","article code",
-    "model",
-    "marca","marcă","brand",
-    "numarul paginii din catalog","catalog page number","catalogue page number",
-    "cod de bare","bar code","barcode",
-    "nume in catalog",
-    "catalogue","catalog","catalogue (title / chapter / page)","catalog (title / chapter / page)",
-    "pachet","package","pack",
-    "engraving color","culoare de gravare",
-}
-def is_banned_key(key: str) -> bool:
-    k = norm_key(key)
-    banned_norm = {norm_key(x) for x in BANNED_KEYS}
-    if k in banned_norm:
-        return True
-    banned_sub = [
-        "tara de origine","country of origin",
-        "catalogue","catalog",
-        "cod unic","numarul paginii din catalog",
-        "cod de bare","bar code","barcode",
-        "cod articol","article code",
-        "engraving","gravare",
-    ]
-    return any(s in k for s in banned_sub)
-
-KEY_MAP = {
-    "color":"Culoare","colour":"Culoare",
-    "net weight":"Greutate neta","weight":"Greutate",
-    "material":"Material",
-    "length":"Lungimea","width":"Latimea","height":"Inaltime",
-}
-def map_key_to_ro(key: str) -> str:
-    return KEY_MAP.get(norm_key(key), key.strip())
-
 # ----------------- translation -----------------
 @st.cache_data(show_spinner=False)
 def translate_to_ro(text: str) -> str:
@@ -74,7 +36,8 @@ def translate_to_ro(text: str) -> str:
         return text
 
 EN_HINT = {"pocket","zip","zippers","lock","water-repellent","waterproof","recycled","certified","anti-theft",
-           "black","grey","gray","leather","strap","laptop","tablet","airport","work","class","lining","volume","litres","liters"}
+           "black","grey","gray","leather","strap","laptop","tablet","airport","work","class","lining","volume","litres","liters",
+           "specifications","primary","secondary","material","colour","length","width","height","weight"}
 
 def looks_english(text: str) -> bool:
     t = (text or "").strip()
@@ -83,7 +46,7 @@ def looks_english(text: str) -> bool:
     low = remove_diacritics(t).lower()
     if any(re.search(rf"\b{re.escape(w)}\b", low) for w in EN_HINT):
         return True
-    return re.fullmatch(r"[A-Za-z0-9 \-–—,:;\"'()\[\]/\.\n]+", t) is not None
+    return re.fullmatch(r"[A-Za-z0-9 \-–—,:;\"'()\[\]/\.\n®™]+", t) is not None
 
 @st.cache_data(show_spinner=False)
 def detect_lang_safe(text: str) -> str:
@@ -112,6 +75,7 @@ def maybe_translate_to_ro(text: str):
 def polish_ro(text: str) -> str:
     t = (text or "")
     t = t.replace("”", '"').replace("“", '"').replace("„", '"')
+    t = t.replace("AWARE™", "AWARETM").replace("AWARE™", "AWARETM")
     t = re.sub(r"\banti[- ]theft\b","antifurt",t,flags=re.IGNORECASE)
     t = re.sub(r"\brpet\b","RPET",t,flags=re.IGNORECASE)
     t = re.sub(r"\bgrs\b","GRS",t,flags=re.IGNORECASE)
@@ -130,109 +94,139 @@ def drop_hallucinated_title(desc: str) -> str:
             return rest2
     return d
 
-# ----------------- parsing -----------------
-KNOWN_KEYS = {
-    "brand","material","colour","color","length","width","height","weight","country of origin","engraving color",
-    "marca","material","culoare","lungime","latime","inaltime","greutate","tara de origine","culoare de gravare"
+# ----------------- key mapping / filtering -----------------
+KEY_MAP = {
+    "colour":"Culoare","color":"Culoare",
+    "volume":"Volum",
+    "fits laptop size":"Se potriveste cu laptop de",
+    "material":"Material",
+    "secondary material":"Material secundar",
+    "secondary colour":"Culoare secundara",
+    "product width":"Latimea produsului",
+    "length product":"Lungime produs",
+    "height product":"Inaltime produs",
+    "net weight product":"Greutate neta produs",
+    "gross weight product":"Greutate bruta produs",
+    "pms colour":"Culoare PMS",
 }
-KNOWN_KEYS_NORM = {norm_key(x) for x in KNOWN_KEYS}
 
-def parse_vertical_kvs(lines: list[str]):
+def map_key_to_ro(key: str) -> str:
+    return KEY_MAP.get(norm_key(key), key.strip())
+
+# remove fields user doesn't want (and similar)
+BANNED_KEY_SUBSTR = [
+    "co2", "emissions benchmark", "co2 emissions",
+    "brand", "product category", "subcategory",
+    "width product box", "height product box", "lenght product box", "length product box",
+    "carton ", "packaging", "intrastat", "quantity per carton", "ean",
+    "per polybag", "inner carton", "country of origin", "tara de origine",
+    "pms secondary colour", "pms secondary color",
+]
+def is_banned_key(key: str) -> bool:
+    k = norm_key(key)
+    return any(s in k for s in [norm_key(x) for x in BANNED_KEY_SUBSTR])
+
+# ----------------- parsing -----------------
+def parse_pairs_from_tab_line(line: str) -> list[tuple[str,str]]:
+    parts = [p.strip() for p in line.split("\t") if p.strip()]
     out=[]
-    i=0
-    while i < len(lines)-1:
-        k=lines[i].strip()
-        v=lines[i+1].strip()
-        if k and v and len(k)<=35 and re.fullmatch(r"[A-Za-zĂÂÎȘȚăâîșț \-/]+", k) and ":" not in k and "\t" not in k:
-            out.append((k,v))
-            i += 2
-        else:
-            i += 1
-    dedup={}
-    for k,v in out:
-        dedup[norm_key(k)] = (k,v)
-    return list(dedup.values())
+    # pairs (0,1), (2,3) ...
+    for i in range(0, len(parts)-1, 2):
+        k, v = parts[i], parts[i+1]
+        if k and v:
+            out.append((k, v))
+    return out
 
-def split_description_then_kvs(lines: list[str]) -> tuple[str, list[str]]:
-    """
-    Works for:
-    - starts with 'Description' header
-    - OR starts directly with a long paragraph, then vertical keys.
-    Returns (description, tail_lines_from_first_key)
-    """
-    clean = [ln.strip() for ln in lines if ln.strip()]
-    if not clean:
-        return "", []
-    # Case A: explicit header
-    if norm_key(clean[0]) in {norm_key("description"), norm_key("descriere")}:
-        i = 1
-        desc_lines=[]
-        while i < len(clean) and norm_key(clean[i]) not in KNOWN_KEYS_NORM:
-            desc_lines.append(clean[i])
-            i += 1
-        return "\n".join(desc_lines).strip(), clean[i:]
-    # Case B: no header; find first known key line that has a value after it
-    i = 0
-    first_key_idx = None
-    while i < len(clean)-1:
-        if norm_key(clean[i]) in KNOWN_KEYS_NORM:
-            first_key_idx = i
-            break
-        i += 1
-    if first_key_idx is not None:
-        desc = "\n".join(clean[:first_key_idx]).strip()
-        tail = clean[first_key_idx:]
-        return desc, tail
-    # fallback: everything is description
-    return "\n".join(clean).strip(), []
-
-def build_output(description: str, kv_lines: list[str]) -> str:
-    parts=[]
-    if description:
-        parts.append("Descriere:")
-        parts.append(description.strip())
-        parts.append("")
-    parts.extend([ln.strip() for ln in kv_lines if ln.strip()])
-    return ("\n".join(parts).strip()+"\n") if parts else ""
+def find_first_nonempty(lines: list[str]) -> str:
+    for ln in lines:
+        if ln.strip():
+            return ln.strip()
+    return ""
 
 def process_input(raw_text: str):
     raw = normalize(raw_text).strip()
     if not raw:
         return "", "unknown"
 
-    raw_lines = raw.split("\n")
-    description, tail = split_description_then_kvs(raw_lines)
-
-    kv_pairs=[]
-    if tail:
-        for k,v in parse_vertical_kvs(tail):
-            k_ro = map_key_to_ro(k)
-            if is_banned_key(k) or is_banned_key(k_ro):
-                continue
-            kv_pairs.append((k_ro, v))
-
+    lines = raw.split("\n")
     detected="unknown"
-    if description:
-        description, detected = maybe_translate_to_ro(description)
-        description = polish_ro(description)
-        description = drop_hallucinated_title(description)
 
-    kv_lines=[]
-    detected2="unknown"
-    for k_ro, v in kv_pairs:
-        if is_banned_key(k_ro):
+    # Title = first non-empty line if it does NOT look like a section header
+    title = find_first_nonempty(lines)
+    if norm_key(title) in {norm_key("description"), norm_key("primary specifications"), norm_key("secondary specifications")}:
+        title = ""
+
+    # Description from "Description<TAB>...." or "Description" section
+    desc = ""
+    for ln in lines:
+        if "\t" in ln:
+            pairs = parse_pairs_from_tab_line(ln)
+            for k,v in pairs:
+                if norm_key(k) in {norm_key("description"), norm_key("descriere")}:
+                    desc = v
+                    break
+        if desc:
+            break
+
+    # specs: parse under Primary/Secondary specifications blocks
+    specs=[]
+    in_specs=False
+    for ln in lines:
+        s = ln.strip()
+        if not s:
             continue
-        v2, lang2 = maybe_translate_to_ro(v)
-        if detected2=="unknown":
-            detected2=lang2
-        kv_lines.append(f"{k_ro}: {polish_ro(v2)}")
+        if norm_key(s) in {norm_key("primary specifications"), norm_key("secondary specifications")}:
+            in_specs=True
+            continue
+        if in_specs and "\t" in ln:
+            for k,v in parse_pairs_from_tab_line(ln):
+                k_ro = map_key_to_ro(k)
+                if is_banned_key(k) or is_banned_key(k_ro):
+                    continue
+                specs.append((k_ro, v))
 
-    if detected=="unknown":
-        detected=detected2
+    # translate title + desc + specs values
+    if title:
+        title_ro, lang_t = maybe_translate_to_ro(title)
+        detected = lang_t if detected=="unknown" else detected
+        title_ro = polish_ro(title_ro)
+    else:
+        title_ro = ""
 
-    out = build_output(description, kv_lines)
-    out = remove_diacritics(out)
-    return out, detected
+    if desc:
+        desc_ro, lang_d = maybe_translate_to_ro(desc)
+        detected = lang_d if detected=="unknown" else detected
+        desc_ro = drop_hallucinated_title(polish_ro(desc_ro))
+    else:
+        # fallback: if no desc field, take everything except specs tables
+        desc_ro, lang_d = maybe_translate_to_ro(raw)
+        detected = lang_d if detected=="unknown" else detected
+        desc_ro = drop_hallucinated_title(polish_ro(desc_ro))
+
+    spec_lines=[]
+    for k_ro, v in specs:
+        v2, lang_v = maybe_translate_to_ro(v)
+        if detected=="unknown":
+            detected = lang_v
+        # light normalizations for units
+        vv = polish_ro(v2)
+        vv = vv.replace(' "', '"').replace("16 ”", '16"')
+        spec_lines.append(f"{k_ro}: {vv}")
+
+    # build output
+    out=[]
+    out.append("Descriere:")
+    if title_ro:
+        out.append(title_ro.strip())
+    out.append(desc_ro.strip())
+    out.append("")
+    if spec_lines:
+        out.append("Specificatii:")
+        out.extend(spec_lines)
+
+    formatted = "\n".join(out).strip() + "\n"
+    formatted = remove_diacritics(formatted)
+    return formatted, detected
 
 # ----------------- UI -----------------
 st.title("Formatare text produs (input brut / tabel -> output formatat, fara diacritice)")
