@@ -48,6 +48,7 @@ BANNED_KEYS = {
     "cod de bare",
     "nume in catalog",
     "pachet",
+    "pack",  # often used in technical tables
     # EN
     "country of origin",
     "catalogue (title / chapter / page)",
@@ -79,7 +80,8 @@ def is_banned_key(key: str) -> bool:
     ]
     return any(s in k for s in banned_sub) or k in {
         norm_key("cod"), norm_key("code"), norm_key("model"), norm_key("marca"), norm_key("brand"),
-        norm_key("package"), norm_key("pachet"), norm_key("cod articol"), norm_key("article code")
+        norm_key("package"), norm_key("pachet"), norm_key("cod articol"), norm_key("article code"),
+        norm_key("pack")
     }
 
 # Map common keys to Romanian (for nicer output)
@@ -103,6 +105,12 @@ KEY_MAP = {
     "additional equipment": "Echipamente suplimentare",
     "product weight": "Greutatea produsului",
     "individual product weight": "Greutatea produsului individual",
+    # technical table headings
+    "measures": "Dimensiuni produs",
+    "ctn dimesions": "Dimensiuni carton",
+    "ctn dimensions": "Dimensiuni carton",
+    "ctn weight": "Greutate carton",
+    "carton": "Bucati / carton",
 }
 
 def map_key_to_ro(key: str) -> str:
@@ -132,7 +140,8 @@ def translate_to_ro(text: str) -> str:
 EN_HINT_WORDS = {
     "pocket", "zip", "zippers", "connector", "lock", "waterproof", "nylon", "gift", "packaging",
     "front", "hidden", "back", "laptop", "tablet", "business", "executive", "anti-theft", "type-c", "usb",
-    "black", "grey", "blue", "red", "green"
+    "black", "white", "grey", "blue", "red", "green", "leather", "extendable", "trolley", "strap",
+    "technical", "information", "additional", "material"
 }
 
 def looks_english_or_foreign_short(text: str) -> bool:
@@ -158,10 +167,9 @@ def maybe_translate_to_ro(text: str) -> tuple[str, str]:
 def polish_ro_phrasing(text: str) -> str:
     t = text or ""
     t = t.replace("”", '"').replace("“", '"').replace("„", '"')
-    t = re.sub(r"\brucsac de afaceri\b", "rucsac business", t, flags=re.IGNORECASE)
-    t = re.sub(r"\bport de tip c\b", "port Type-C", t, flags=re.IGNORECASE)
-    t = re.sub(r"\bport type-c\b", "port Type-C", t, flags=re.IGNORECASE)
     t = re.sub(r"\banti[- ]theft\b", "antifurt", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bpu leather\b", "piele PU", t, flags=re.IGNORECASE)
+    t = re.sub(r"\btrolley strap\b", "curea pentru troler", t, flags=re.IGNORECASE)
     return t
 
 # ----------------- parsing -----------------
@@ -185,7 +193,8 @@ def extract_section(text: str, headers: list[str]) -> str:
     start = idx + 1
     known_headers = [
         "Informații de bază", "Informatii de baza", "Descriere", "Caracteristici cheie", "Caracteristici",
-        "Basic Information", "Description", "Key features", "Key features:", "Product specific details",
+        "Basic Information", "Description", "Key features", "Key features:",
+        "Technical information", "Additional info", "Product specific details",
     ]
     end = len(lines)
     for j in range(start, len(lines)):
@@ -224,7 +233,8 @@ def parse_tab_kvs(text: str):
             "Product specific details",
             "Informatii de baza", "Informații de bază",
             "Descriere", "Caracteristici cheie",
-            "Basic Information", "Description", "Key features", "Key features:"
+            "Basic Information", "Description", "Key features", "Key features:",
+            "Technical information", "Additional info"
         ]):
             continue
 
@@ -246,6 +256,55 @@ def parse_bullets(block: str):
         parts = [p.strip(" \t-•") for p in b.split("•")]
         return [p for p in parts if p]
     return [b] if b else []
+
+def detect_color_line(lines: list[str]) -> str:
+    # Look for a standalone color word line
+    color_words = {"black","white","grey","gray","red","blue","green","yellow","orange","pink","purple","brown","beige","navy"}
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            continue
+        if len(s) <= 18 and re.fullmatch(r"[A-Za-z \-]+", s):
+            low = s.lower().strip()
+            if low in color_words:
+                return s
+    return ""
+
+def parse_technical_table(block: str):
+    """
+    Parses a simple table like:
+    Pack  Carton  Measures  Ctn dimensions  Ctn weight
+    1     10      [30cm/44cm/18cm]  [44.00cm/64.00cm/46.00cm]  8.1kg
+
+    Returns list of (header, value)
+    """
+    lines = [ln.strip() for ln in normalize(block).split("\n") if ln.strip()]
+    if len(lines) < 2:
+        return []
+
+    header_line = lines[0]
+    data_line = None
+    # pick first line after header that starts with a digit (row)
+    for ln in lines[1:]:
+        if re.match(r"^\d", ln):
+            data_line = ln
+            break
+    if not data_line:
+        data_line = lines[1]
+
+    # split by 2+ spaces or tabs
+    headers = [h.strip() for h in re.split(r"\t+|\s{2,}", header_line) if h.strip()]
+    values = [v.strip() for v in re.split(r"\t+|\s{2,}", data_line) if v.strip()]
+
+    # if mismatch, try a more permissive split (single spaces) as fallback
+    if len(values) < len(headers) and "\t" not in data_line:
+        values = [v.strip() for v in re.split(r"\s{1,}", data_line) if v.strip()]
+
+    out = []
+    for i, h in enumerate(headers):
+        if i < len(values):
+            out.append((h, values[i]))
+    return out
 
 def build_formatted(title: str, description: str, characteristics_lines: list[str]) -> str:
     parts = []
@@ -290,7 +349,8 @@ def process_input(raw_text: str) -> tuple[str, str]:
     if not raw:
         return "", "unknown"
 
-    tab_lines = sum(1 for ln in raw.split("\n") if "\t" in ln)
+    lines = raw.split("\n")
+    tab_lines = sum(1 for ln in lines if "\t" in ln)
     is_tabular = tab_lines >= 2
 
     title = ""
@@ -311,33 +371,65 @@ def process_input(raw_text: str) -> tuple[str, str]:
                 continue
             characteristics.append(f"{k}: {v}")
 
-        description, detected_lang_any = maybe_translate_to_ro(description)
-        description = polish_ro_phrasing(description)
-
-        characteristics, detected2 = translate_characteristics_lines(characteristics)
-        if detected_lang_any == "unknown":
-            detected_lang_any = detected2
-
     else:
-        basic = extract_section(raw, ["Informații de bază", "Informatii de baza", "Basic Information"])
-        description = extract_section(raw, ["Descriere", "Description"])
-        keyf = extract_section(raw, ["Caracteristici cheie", "Key features", "Key features:"])
+        # Freeform fallback: title = first non-empty line (often "KUGAR 1048")
+        for ln in lines:
+            if ln.strip():
+                title = ln.strip()
+                break
 
-        kvs_basic = [(k, v) for (k, v) in parse_key_values_colon(basic) if not is_banned_key(k)]
-        for k, v in kvs_basic:
-            characteristics.append(f"{k}: {v}")
+        # Description = all paragraphs until a known header appears
+        desc_lines = []
+        stop_headers = {"technical information", "additional info", "key features", "key features:", "informatii de baza", "informații de bază"}
+        started = False
+        for ln in lines:
+            s = ln.strip()
+            if not started:
+                if s == title:
+                    started = True
+                continue
+            if s and s.lower().rstrip(":") in stop_headers:
+                break
+            desc_lines.append(ln)
+        description = "\n".join(desc_lines).strip()
 
-        characteristics.extend(parse_bullets(keyf))
+        # Standalone color line
+        color = detect_color_line(lines)
+        if color:
+            characteristics.append(f"Color: {color}")
 
-        description, detected_lang_any = maybe_translate_to_ro(description)
-        description = polish_ro_phrasing(description)
+        # Technical table
+        tech = extract_section(raw, ["Technical information"])
+        if tech:
+            kvs_tech = parse_technical_table(tech)
+            for k, v in kvs_tech:
+                if is_banned_key(k):
+                    continue
+                characteristics.append(f"{k}: {v}")
 
-        characteristics, detected2 = translate_characteristics_lines(characteristics)
-        if detected_lang_any == "unknown":
-            detected_lang_any = detected2
+        # Additional info (Material: ...)
+        add = extract_section(raw, ["Additional info"])
+        if add:
+            for k, v in parse_key_values_colon(add):
+                if is_banned_key(k):
+                    continue
+                characteristics.append(f"{k}: {v}")
+
+    # Translate & polish
+    description, detected_lang_any = maybe_translate_to_ro(description)
+    description = polish_ro_phrasing(description)
+
+    characteristics, detected2 = translate_characteristics_lines(characteristics)
+    if detected_lang_any == "unknown":
+        detected_lang_any = detected2
+
+    # Remove "Pack" key if it slipped in with a mapped key like "Pack"
+    characteristics = [ln for ln in characteristics if norm_key(ln.split(":",1)[0]) not in {norm_key("pack"), norm_key("pachet")}]
 
     formatted = build_formatted(title, description, characteristics)
-    formatted = remove_diacritics(formatted)  # final output without diacritics
+
+    # final output without diacritics
+    formatted = remove_diacritics(formatted)
     return formatted, detected_lang_any
 
 # ----------------- UI -----------------
@@ -356,7 +448,7 @@ widget_key = f"raw_text_{st.session_state['reset_counter']}"
 
 with st.form("formatter_form"):
     st.text_area(
-        "Text brut (accepta: sectiuni sau tabel cu TAB-uri)",
+        "Text brut (accepta: sectiuni, tabel cu TAB-uri sau text liber cu 'Technical information')",
         height=320,
         key=widget_key,
         placeholder="Lipeste aici textul brut…",
@@ -368,7 +460,6 @@ with st.form("formatter_form"):
         reset = st.form_submit_button("Reset (text nou)", use_container_width=True)
 
 if reset:
-    # increment counter -> creates a new text_area key, empty by default
     st.session_state["reset_counter"] += 1
     st.session_state["formatted"] = ""
     st.session_state["detected_lang"] = "unknown"
