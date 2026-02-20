@@ -1,68 +1,41 @@
 import streamlit as st
 import unicodedata
 import re
-
 from langdetect import detect, LangDetectException
 from deep_translator import GoogleTranslator
 
 st.set_page_config(page_title="Product Text Formatter", layout="centered")
 
-# ----------------- text helpers -----------------
 def remove_diacritics(text: str) -> str:
     if not text:
         return ""
     nfkd = unicodedata.normalize("NFKD", text)
     no_marks = "".join(ch for ch in nfkd if not unicodedata.combining(ch))
-    replacements = {
-        "ș": "s", "Ş": "S", "ț": "t", "Ţ": "T",
-        "ă": "a", "Ă": "A", "â": "a", "Â": "A",
-        "î": "i", "Î": "I",
-    }
-    for a, b in replacements.items():
-        no_marks = no_marks.replace(a, b)
+    replacements = {"ș":"s","Ş":"S","ț":"t","Ţ":"T","ă":"a","Ă":"A","â":"a","Â":"A","î":"i","Î":"I"}
+    for a,b in replacements.items():
+        no_marks = no_marks.replace(a,b)
     no_marks = re.sub(r"[ \t]+\n", "\n", no_marks)
     no_marks = re.sub(r"\n{3,}", "\n\n", no_marks)
     return no_marks
 
 def normalize(text: str) -> str:
-    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    return (text or "").replace("\r\n","\n").replace("\r","\n")
 
 def norm_key(k: str) -> str:
     k = remove_diacritics(k or "").lower().strip()
-    k = re.sub(r"\s+", " ", k)
+    k = re.sub(r"\s+"," ",k)
     return k
 
-# ----------------- rules -----------------
-# Always remove these fields from "Caracteristici"
 BANNED_KEYS = {
-    # RO
-    "tara de origine",
-    "cod unic de inregistrare",
-    "cod unic de înregistrare",
-    "cod",
-    "cod articol",
-    "model",
-    "marca",
-    "marcă",
-    "numarul paginii din catalog",
-    "cod de bare",
+    "tara de origine","country of origin",
+    "cod unic de inregistrare","cod unic de înregistrare",
+    "cod","code","cod articol","article code",
+    "model","marca","marcă","brand",
+    "numarul paginii din catalog","catalog page number","catalogue page number",
+    "cod de bare","bar code","barcode",
     "nume in catalog",
-    "pachet",
-    "pack",  # often used in technical tables
-    # EN
-    "country of origin",
-    "catalogue (title / chapter / page)",
-    "catalog (title / chapter / page)",
-    "catalogue",
-    "catalog",
-    "code",
-    "article code",
-    "brand",
-    "catalogue page number",
-    "catalog page number",
-    "bar code",
-    "barcode",
-    "package",
+    "catalogue","catalog","catalogue (title / chapter / page)","catalog (title / chapter / page)",
+    "pachet","package","pack",
 }
 
 def is_banned_key(key: str) -> bool:
@@ -70,65 +43,20 @@ def is_banned_key(key: str) -> bool:
     banned_norm = {norm_key(x) for x in BANNED_KEYS}
     if k in banned_norm:
         return True
-    banned_sub = [
-        "tara de origine", "country of origin",
-        "catalogue", "catalog",
-        "cod unic",
-        "numarul paginii din catalog", "catalog page number", "catalogue page number",
-        "cod de bare", "bar code", "barcode",
-        "cod articol", "article code",
-    ]
-    return any(s in k for s in banned_sub) or k in {
-        norm_key("cod"), norm_key("code"), norm_key("model"), norm_key("marca"), norm_key("brand"),
-        norm_key("package"), norm_key("pachet"), norm_key("cod articol"), norm_key("article code"),
-        norm_key("pack")
-    }
+    banned_sub = ["tara de origine","country of origin","catalogue","catalog","cod unic","numarul paginii din catalog","catalog page number",
+                  "cod de bare","bar code","barcode","cod articol","article code"]
+    return any(s in k for s in banned_sub) or k in {norm_key("cod"),norm_key("code"),norm_key("model"),norm_key("marca"),norm_key("brand"),
+                                                   norm_key("package"),norm_key("pachet"),norm_key("pack")}
 
-# Map common keys to Romanian (for nicer output)
 KEY_MAP = {
-    "color": "Culoare",
-    "culori": "Culoare",
-    "culoare/culori": "Culoare",
-    "net weight": "Greutate neta",
-    "gross weight": "Greutate bruta",
-    "weight": "Greutate",
-    "material": "Material",
-    "materials": "Material",
-    "material(e)": "Material",
-    "dimension": "Dimensiuni",
-    "dimensions": "Dimensiuni",
-    "dimenzija": "Dimensiuni",
-    "size": "Dimensiuni",
-    "capacity": "Capacitate",
-    "volume": "Capacitate",
-    "performance": "Performanta",
-    "additional equipment": "Echipamente suplimentare",
-    "product weight": "Greutatea produsului",
-    "individual product weight": "Greutatea produsului individual",
-    # technical table headings
-    "measures": "Dimensiuni produs",
-    "ctn dimesions": "Dimensiuni carton",
-    "ctn dimensions": "Dimensiuni carton",
-    "ctn weight": "Greutate carton",
-    "carton": "Bucati / carton",
+    "color":"Culoare","net weight":"Greutate neta","weight":"Greutate","material":"Material",
+    "dimensions":"Dimensiuni","dimension":"Dimensiuni","size":"Dimensiuni","dimenzija":"Dimensiuni",
+    "capacity":"Capacitate","performance":"Performanta","additional equipment":"Echipamente suplimentare",
+    "measures":"Dimensiuni produs","ctn dimesions":"Dimensiuni carton","ctn dimensions":"Dimensiuni carton",
+    "ctn weight":"Greutate carton","carton":"Bucati / carton"
 }
-
 def map_key_to_ro(key: str) -> str:
-    k = norm_key(key)
-    return KEY_MAP.get(k, key.strip())
-
-# ----------------- language (better translation) -----------------
-@st.cache_data(show_spinner=False)
-def detect_lang_safe(text: str) -> str:
-    try:
-        sample = re.sub(r"\s+", " ", (text or "")).strip()
-        if len(sample) < 35:
-            return "unknown"
-        return detect(sample)
-    except LangDetectException:
-        return "unknown"
-    except Exception:
-        return "unknown"
+    return KEY_MAP.get(norm_key(key), key.strip())
 
 @st.cache_data(show_spinner=False)
 def translate_to_ro(text: str) -> str:
@@ -137,323 +65,266 @@ def translate_to_ro(text: str) -> str:
     except Exception:
         return text
 
-EN_HINT_WORDS = {
-    "pocket", "zip", "zippers", "connector", "lock", "waterproof", "nylon", "gift", "packaging",
-    "front", "hidden", "back", "laptop", "tablet", "business", "executive", "anti-theft", "type-c", "usb",
-    "black", "white", "grey", "blue", "red", "green", "leather", "extendable", "trolley", "strap",
-    "technical", "information", "additional", "material"
-}
+EN_HINT_WORDS = {"pocket","zip","zippers","connector","lock","waterproof","nylon","gift","packaging",
+                 "front","hidden","back","laptop","tablet","business","executive","anti-theft","type-c","usb",
+                 "black","white","grey","gray","blue","red","green","leather","extendable","trolley","strap",
+                 "technical","information","additional","material","made of","offers"}
 
-def looks_english_or_foreign_short(text: str) -> bool:
+def looks_english_or_foreign(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
     low = remove_diacritics(t).lower()
     if any(re.search(rf"\b{re.escape(w)}\b", low) for w in EN_HINT_WORDS):
         return True
-    if re.fullmatch(r"[A-Za-z0-9 \-–—,:;\"'()\[\]/\.]+", t) and not re.search(r"\b(si|sau|pentru|cu|din|este)\b", low):
+    if re.fullmatch(r"[A-Za-z0-9 \-–—,:;\"'()\[\]/\.\n]+", t) and not re.search(r"\b(si|sau|pentru|cu|din|este|sunt)\b", low):
         return True
     return False
 
-def maybe_translate_to_ro(text: str) -> tuple[str, str]:
-    t = text or ""
-    lang = detect_lang_safe(t)
-    if lang not in ("ro", "unknown"):
-        return translate_to_ro(t), lang
-    if lang == "unknown" and looks_english_or_foreign_short(t):
-        return translate_to_ro(t), "auto"
-    return t, lang
+@st.cache_data(show_spinner=False)
+def detect_lang_safe(text: str) -> str:
+    try:
+        sample = re.sub(r"\s+"," ", (text or "")).strip()
+        if len(sample) < 50:
+            return "en" if looks_english_or_foreign(sample) else "unknown"
+        sample2 = re.sub(r"[\d\[\]\(\)/\"'.,:;-]+"," ",sample)
+        sample2 = re.sub(r"\s+"," ",sample2).strip()
+        if looks_english_or_foreign(sample2):
+            return "en"
+        return detect(sample2)
+    except LangDetectException:
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+def maybe_translate_to_ro(text: str):
+    lang = detect_lang_safe(text)
+    if lang not in ("ro","unknown"):
+        return translate_to_ro(text), lang
+    if lang=="unknown" and looks_english_or_foreign(text):
+        return translate_to_ro(text), "auto"
+    return text, lang
 
 def polish_ro_phrasing(text: str) -> str:
     t = text or ""
     t = t.replace("”", '"').replace("“", '"').replace("„", '"')
-    t = re.sub(r"\banti[- ]theft\b", "antifurt", t, flags=re.IGNORECASE)
-    t = re.sub(r"\bpu leather\b", "piele PU", t, flags=re.IGNORECASE)
-    t = re.sub(r"\btrolley strap\b", "curea pentru troler", t, flags=re.IGNORECASE)
+    t = re.sub(r"\banti[- ]theft\b","antifurt",t,flags=re.IGNORECASE)
+    t = re.sub(r"\bpu leather\b","piele PU",t,flags=re.IGNORECASE)
+    t = re.sub(r"\btrolley strap\b","curea pentru troler",t,flags=re.IGNORECASE)
     return t
 
-# ----------------- parsing -----------------
 def header_match(line: str, header: str) -> bool:
-    a = line.strip().lower().rstrip(":").strip()
-    b = header.strip().lower().rstrip(":").strip()
-    return a == b
+    return line.strip().lower().rstrip(":").strip() == header.strip().lower().rstrip(":").strip()
 
 def extract_section(text: str, headers: list[str]) -> str:
     t = normalize(text)
     lines = t.split("\n")
-
-    idx = None
-    for i, ln in enumerate(lines):
-        if any(header_match(ln, h) for h in headers):
-            idx = i
-            break
+    idx=None
+    for i,ln in enumerate(lines):
+        if any(header_match(ln,h) for h in headers):
+            idx=i; break
     if idx is None:
         return ""
-
-    start = idx + 1
-    known_headers = [
-        "Informații de bază", "Informatii de baza", "Descriere", "Caracteristici cheie", "Caracteristici",
-        "Basic Information", "Description", "Key features", "Key features:",
-        "Technical information", "Additional info", "Product specific details",
-    ]
-    end = len(lines)
-    for j in range(start, len(lines)):
-        s = lines[j].strip()
-        if not s:
+    start=idx+1
+    known=["Informații de bază","Informatii de baza","Descriere","Caracteristici cheie","Caracteristici",
+           "Basic Information","Description","Key features","Key features:","Technical information","Additional info","Product specific details"]
+    end=len(lines)
+    for j in range(start,len(lines)):
+        s=lines[j].strip()
+        if not s: 
             continue
-        if any(header_match(s, h) for h in known_headers):
-            end = j
-            break
-        if (":" not in s) and ("\t" not in s) and (len(s) <= 40) and re.search(r"[A-Za-zĂÂÎȘȚăâîșț]", s):
-            end = j
-            break
-
+        if any(header_match(s,h) for h in known):
+            end=j; break
     return "\n".join(lines[start:end]).strip()
 
 def parse_key_values_colon(block: str):
-    out = []
+    out=[]
     for ln in normalize(block).split("\n"):
-        ln = ln.strip()
-        if not ln or ":" not in ln:
+        ln=ln.strip()
+        if not ln or ":" not in ln: 
             continue
-        k, v = ln.split(":", 1)
-        k, v = k.strip(), v.strip()
-        if k and v:
-            out.append((k, v))
+        k,v=ln.split(":",1)
+        k,v=k.strip(),v.strip()
+        if k and v: out.append((k,v))
     return out
 
-def parse_tab_kvs(text: str):
-    out = []
-    for ln in normalize(text).split("\n"):
-        ln = ln.strip()
-        if not ln:
+def is_kv_tabular_style(raw: str) -> bool:
+    lines=[ln for ln in normalize(raw).split("\n") if ln.strip()]
+    tabbed=[ln for ln in lines if "\t" in ln]
+    if len(tabbed)<3:
+        return False
+    cols=[len([p for p in ln.split("\t") if p.strip()]) for ln in tabbed]
+    if any(c>=3 for c in cols):
+        return False
+    kv_like=sum(1 for c in cols if c==2)
+    return kv_like/max(1,len(tabbed))>=0.7
+
+def parse_tab_kvs(raw: str):
+    out=[]
+    for ln in normalize(raw).split("\n"):
+        if "\t" not in ln: 
             continue
-
-        if any(header_match(ln, h) for h in [
-            "Product specific details",
-            "Informatii de baza", "Informații de bază",
-            "Descriere", "Caracteristici cheie",
-            "Basic Information", "Description", "Key features", "Key features:",
-            "Technical information", "Additional info"
-        ]):
-            continue
-
-        if "\t" in ln:
-            parts = [p.strip() for p in ln.split("\t") if p.strip()]
-        else:
-            parts = [p.strip() for p in re.split(r"\s{2,}", ln) if p.strip()]
-
-        if len(parts) >= 2:
-            out.append((parts[0], " ".join(parts[1:]).strip()))
+        parts=[p.strip() for p in ln.split("\t") if p.strip()]
+        if len(parts)==2:
+            out.append((parts[0],parts[1]))
     return out
 
-def parse_bullets(block: str):
-    if not block:
-        return []
-    b = normalize(block).strip()
-    b = re.sub(r"\n+", " ", b)
-    if "•" in b:
-        parts = [p.strip(" \t-•") for p in b.split("•")]
-        return [p for p in parts if p]
-    return [b] if b else []
-
-def detect_color_line(lines: list[str]) -> str:
-    # Look for a standalone color word line
-    color_words = {"black","white","grey","gray","red","blue","green","yellow","orange","pink","purple","brown","beige","navy"}
+def detect_color_line(lines):
+    colors={"black","white","grey","gray","red","blue","green","yellow","orange","pink","purple","brown","beige","navy"}
     for ln in lines:
-        s = ln.strip()
-        if not s:
-            continue
-        if len(s) <= 18 and re.fullmatch(r"[A-Za-z \-]+", s):
-            low = s.lower().strip()
-            if low in color_words:
-                return s
+        s=ln.strip()
+        if s and len(s)<=18 and re.fullmatch(r"[A-Za-z \-]+", s) and s.lower().strip() in colors:
+            return s
     return ""
 
 def parse_technical_table(block: str):
-    """
-    Parses a simple table like:
-    Pack  Carton  Measures  Ctn dimensions  Ctn weight
-    1     10      [30cm/44cm/18cm]  [44.00cm/64.00cm/46.00cm]  8.1kg
-
-    Returns list of (header, value)
-    """
-    lines = [ln.strip() for ln in normalize(block).split("\n") if ln.strip()]
-    if len(lines) < 2:
+    lines=[ln.rstrip() for ln in normalize(block).split("\n") if ln.strip()]
+    if len(lines)<2:
         return []
-
-    header_line = lines[0]
-    data_line = None
-    # pick first line after header that starts with a digit (row)
+    header_line=lines[0].strip()
+    data_line=None
     for ln in lines[1:]:
-        if re.match(r"^\d", ln):
-            data_line = ln
-            break
+        if re.match(r"^\s*\d", ln):
+            data_line=ln.strip(); break
     if not data_line:
-        data_line = lines[1]
+        data_line=lines[1].strip()
 
-    # split by 2+ spaces or tabs
-    headers = [h.strip() for h in re.split(r"\t+|\s{2,}", header_line) if h.strip()]
-    values = [v.strip() for v in re.split(r"\t+|\s{2,}", data_line) if v.strip()]
+    def split_cols(s: str):
+        if "\t" in s:
+            return [p.strip() for p in s.split("\t") if p.strip()]
+        parts=[p.strip() for p in re.split(r"\s{2,}", s) if p.strip()]
+        if len(parts)>=3:
+            return parts
+        return [p.strip() for p in re.split(r"\s+", s) if p.strip()]
 
-    # if mismatch, try a more permissive split (single spaces) as fallback
-    if len(values) < len(headers) and "\t" not in data_line:
-        values = [v.strip() for v in re.split(r"\s{1,}", data_line) if v.strip()]
+    headers=split_cols(header_line)
+    values=split_cols(data_line)
 
-    out = []
-    for i, h in enumerate(headers):
-        if i < len(values):
+    joined=" ".join(headers).lower()
+    if "ctn" in joined and ("dimesions" in joined or "dimensions" in joined):
+        headers=["Pack","Carton","Measures","Ctn dimensions","Ctn weight"]
+
+    out=[]
+    for i,h in enumerate(headers):
+        if i<len(values):
             out.append((h, values[i]))
     return out
 
-def build_formatted(title: str, description: str, characteristics_lines: list[str]) -> str:
-    parts = []
-    title = (title or "").strip()
-    description = (description or "").strip()
-
-    if title:
-        parts += [title, ""]
-    if description:
-        parts += [description, ""]
+def build_formatted(title, description, characteristics_lines):
+    parts=[]
+    if title: parts += [title.strip(), ""]
+    if description: parts += [description.strip(), ""]
     if characteristics_lines:
         parts.append("Caracteristici:")
         for ln in characteristics_lines:
-            ln = (ln or "").strip()
-            if not ln:
+            ln=ln.strip()
+            if not ln: 
                 continue
-            if not ln.endswith(";"):
-                ln += ";"
+            if not ln.endswith(";"): ln += ";"
             parts.append(ln)
-    return ("\n".join(parts).strip() + "\n") if parts else ""
+    return ("\n".join(parts).strip()+"\n") if parts else ""
 
-def translate_characteristics_lines(lines: list[str]) -> tuple[list[str], str]:
-    detected_any = "unknown"
-    out = []
+def translate_characteristics(lines):
+    detected_any="unknown"
+    out=[]
     for line in lines:
         if ":" in line:
-            k, v = line.split(":", 1)
-            k_ro = map_key_to_ro(k)
-            v2, lang2 = maybe_translate_to_ro(v.strip())
-            if detected_any == "unknown":
-                detected_any = lang2
+            k,v=line.split(":",1)
+            k_ro=map_key_to_ro(k)
+            v2,lang2=maybe_translate_to_ro(v.strip())
+            if detected_any=="unknown": detected_any=lang2
             out.append(f"{k_ro}: {polish_ro_phrasing(v2)}")
         else:
-            l2, lang2 = maybe_translate_to_ro(line)
-            if detected_any == "unknown":
-                detected_any = lang2
+            l2,lang2=maybe_translate_to_ro(line)
+            if detected_any=="unknown": detected_any=lang2
             out.append(polish_ro_phrasing(l2))
     return out, detected_any
 
-def process_input(raw_text: str) -> tuple[str, str]:
-    raw = normalize(raw_text).strip()
+def process_input(raw_text: str):
+    raw=normalize(raw_text).strip()
     if not raw:
         return "", "unknown"
+    lines=raw.split("\n")
+    title=""; description=""; characteristics=[]
+    detected_lang_any="unknown"
 
-    lines = raw.split("\n")
-    tab_lines = sum(1 for ln in lines if "\t" in ln)
-    is_tabular = tab_lines >= 2
-
-    title = ""
-    description = ""
-    characteristics = []
-    detected_lang_any = "unknown"
-
-    if is_tabular:
-        kvs = [(k, v) for (k, v) in parse_tab_kvs(raw) if not is_banned_key(k)]
-        data = {norm_key(k): v for k, v in kvs}
-
-        title = data.get(norm_key("Nume produs"), "") or data.get(norm_key("Product name"), "")
-        description = data.get(norm_key("Descriere"), "") or data.get(norm_key("Description"), "")
-
-        skip = {norm_key("Nume produs"), norm_key("Product name"), norm_key("Descriere"), norm_key("Description")}
-        for k, v in kvs:
-            if norm_key(k) in skip:
+    if is_kv_tabular_style(raw):
+        kvs=[(k,v) for (k,v) in parse_tab_kvs(raw) if not is_banned_key(k)]
+        data={norm_key(k):v for k,v in kvs}
+        title=data.get(norm_key("Nume produs"),"") or data.get(norm_key("Product name"),"")
+        description=data.get(norm_key("Descriere"),"") or data.get(norm_key("Description"),"")
+        skip={norm_key("Nume produs"),norm_key("Product name"),norm_key("Descriere"),norm_key("Description")}
+        for k,v in kvs:
+            if norm_key(k) in skip: 
                 continue
             characteristics.append(f"{k}: {v}")
-
     else:
-        # Freeform fallback: title = first non-empty line (often "KUGAR 1048")
+        # freeform
         for ln in lines:
-            if ln.strip():
-                title = ln.strip()
-                break
-
-        # Description = all paragraphs until a known header appears
-        desc_lines = []
-        stop_headers = {"technical information", "additional info", "key features", "key features:", "informatii de baza", "informații de bază"}
-        started = False
+            if ln.strip(): title=ln.strip(); break
+        stop_headers={"technical information","additional info","key features","key features:","basic information","informatii de baza","informații de bază"}
+        desc_lines=[]; started=False
         for ln in lines:
-            s = ln.strip()
+            s=ln.strip()
             if not started:
-                if s == title:
-                    started = True
+                if s==title: started=True
                 continue
             if s and s.lower().rstrip(":") in stop_headers:
                 break
             desc_lines.append(ln)
-        description = "\n".join(desc_lines).strip()
+        description="\n".join(desc_lines).strip()
 
-        # Standalone color line
-        color = detect_color_line(lines)
+        color=detect_color_line(lines)
         if color:
             characteristics.append(f"Color: {color}")
 
-        # Technical table
-        tech = extract_section(raw, ["Technical information"])
+        tech=extract_section(raw, ["Technical information"])
         if tech:
-            kvs_tech = parse_technical_table(tech)
-            for k, v in kvs_tech:
-                if is_banned_key(k):
+            for k,v in parse_technical_table(tech):
+                if is_banned_key(k): 
                     continue
                 characteristics.append(f"{k}: {v}")
 
-        # Additional info (Material: ...)
-        add = extract_section(raw, ["Additional info"])
+        add=extract_section(raw, ["Additional info"])
         if add:
-            for k, v in parse_key_values_colon(add):
-                if is_banned_key(k):
+            for k,v in parse_key_values_colon(add):
+                if is_banned_key(k): 
                     continue
                 characteristics.append(f"{k}: {v}")
 
-    # Translate & polish
     description, detected_lang_any = maybe_translate_to_ro(description)
     description = polish_ro_phrasing(description)
 
-    characteristics, detected2 = translate_characteristics_lines(characteristics)
-    if detected_lang_any == "unknown":
-        detected_lang_any = detected2
+    characteristics, detected2 = translate_characteristics(characteristics)
+    if detected_lang_any=="unknown": detected_lang_any=detected2
 
-    # Remove "Pack" key if it slipped in with a mapped key like "Pack"
-    characteristics = [ln for ln in characteristics if norm_key(ln.split(":",1)[0]) not in {norm_key("pack"), norm_key("pachet")}]
+    # final cleanup: remove pack/pachet lines if any
+    cleaned=[]
+    for ln in characteristics:
+        key=ln.split(":",1)[0] if ":" in ln else ln
+        if norm_key(key) in {norm_key("pack"),norm_key("package"),norm_key("pachet")}:
+            continue
+        cleaned.append(ln)
 
-    formatted = build_formatted(title, description, characteristics)
-
-    # final output without diacritics
-    formatted = remove_diacritics(formatted)
+    formatted=build_formatted(title, description, cleaned)
+    formatted=remove_diacritics(formatted)
     return formatted, detected_lang_any
 
-# ----------------- UI -----------------
 st.title("Formatare text produs (input brut / tabel -> output formatat, fara diacritice)")
 st.caption("Lipeste textul, apoi apasa **Aranjeaza textul**. Foloseste **Reset** pentru alt produs.")
 
-# Reset-safe strategy: use a changing widget key (no direct assignment to widget's session key)
 if "reset_counter" not in st.session_state:
-    st.session_state["reset_counter"] = 0
+    st.session_state["reset_counter"]=0
 if "formatted" not in st.session_state:
-    st.session_state["formatted"] = ""
+    st.session_state["formatted"]=""
 if "detected_lang" not in st.session_state:
-    st.session_state["detected_lang"] = "unknown"
+    st.session_state["detected_lang"]="unknown"
 
-widget_key = f"raw_text_{st.session_state['reset_counter']}"
+widget_key=f"raw_text_{st.session_state['reset_counter']}"
 
 with st.form("formatter_form"):
-    st.text_area(
-        "Text brut (accepta: sectiuni, tabel cu TAB-uri sau text liber cu 'Technical information')",
-        height=320,
-        key=widget_key,
-        placeholder="Lipeste aici textul brut…",
-    )
-    c1, c2 = st.columns(2)
+    st.text_area("Text brut", height=320, key=widget_key, placeholder="Lipeste aici textul brut…")
+    c1,c2 = st.columns(2)
     with c1:
         submitted = st.form_submit_button("Aranjeaza textul", use_container_width=True)
     with c2:
@@ -466,23 +337,20 @@ if reset:
     st.rerun()
 
 if submitted:
-    raw_input = st.session_state.get(widget_key, "")
-    formatted, lang = process_input(raw_input)
-    st.session_state["formatted"] = formatted
-    st.session_state["detected_lang"] = lang
+    formatted, lang = process_input(st.session_state.get(widget_key,""))
+    st.session_state["formatted"]=formatted
+    st.session_state["detected_lang"]=lang
 
 if st.session_state["formatted"]:
     st.subheader("Rezultat")
-    if st.session_state["detected_lang"] not in ("unknown", "ro"):
+    if st.session_state["detected_lang"] not in ("unknown","ro"):
         st.caption(f"Detectat: {st.session_state['detected_lang']} → tradus in romana, apoi eliminare diacritice")
     st.code(st.session_state["formatted"], language="text")
 
     st.components.v1.html(
         f"""
         <div style="display:flex; gap:10px; align-items:center; margin-top:6px;">
-          <button id="copyBtn" style="
-            padding:8px 12px; border-radius:8px; border:1px solid #ccc; cursor:pointer;
-            background:#fff;">
+          <button id="copyBtn" style="padding:8px 12px; border-radius:8px; border:1px solid #ccc; cursor:pointer; background:#fff;">
             Copy
           </button>
           <span id="copyStatus" style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; font-size: 14px;"></span>
@@ -506,10 +374,8 @@ if st.session_state["formatted"]:
         height=60,
     )
 
-    st.download_button(
-        "Descarca rezultat .txt",
+    st.download_button("Descarca rezultat .txt",
         data=st.session_state["formatted"].encode("utf-8"),
         file_name="text_produs_formatat.txt",
         mime="text/plain",
-        use_container_width=True,
-    )
+        use_container_width=True)
