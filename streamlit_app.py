@@ -6,6 +6,7 @@ from deep_translator import GoogleTranslator
 
 st.set_page_config(page_title="Product Text Formatter", layout="centered")
 
+# ----------------- helpers -----------------
 def remove_diacritics(text: str) -> str:
     if not text:
         return ""
@@ -26,6 +27,7 @@ def norm_key(k: str) -> str:
     k = re.sub(r"\s+"," ",k)
     return k
 
+# ----------------- filters -----------------
 BANNED_KEYS = {
     "tara de origine","country of origin",
     "cod unic de inregistrare","cod unic de înregistrare",
@@ -38,7 +40,6 @@ BANNED_KEYS = {
     "pachet","package","pack",
     "engraving color","culoare de gravare",
 }
-
 def is_banned_key(key: str) -> bool:
     k = norm_key(key)
     banned_norm = {norm_key(x) for x in BANNED_KEYS}
@@ -57,6 +58,7 @@ KEY_MAP = {
 def map_key_to_ro(key: str) -> str:
     return KEY_MAP.get(norm_key(key), key.strip())
 
+# ----------------- translation -----------------
 @st.cache_data(show_spinner=False)
 def translate_to_ro(text: str) -> str:
     try:
@@ -101,36 +103,53 @@ def maybe_translate_to_ro(text: str):
     return text, lang
 
 def polish_ro(text: str) -> str:
-    t = text or ""
+    t = (text or "")
     t = t.replace("”", '"').replace("“", '"').replace("„", '"')
     t = re.sub(r"\banti[- ]theft\b","antifurt",t,flags=re.IGNORECASE)
     t = re.sub(r"\brpet\b","RPET",t,flags=re.IGNORECASE)
     t = re.sub(r"\bgrs\b","GRS",t,flags=re.IGNORECASE)
+    # remove accidental repeated "Descriere" header inside the body
+    t = re.sub(r"^\s*Descriere\s*\n+", "", t, flags=re.IGNORECASE)
     return t
 
-def header_match(line: str, header: str) -> bool:
-    return line.strip().lower().rstrip(":").strip() == header.strip().lower().rstrip(":").strip()
+def drop_hallucinated_title(desc: str) -> str:
+    """If translator adds a short 'title' line before the real paragraph, drop it."""
+    d = (desc or "").strip()
+    if "\n" not in d:
+        return d
+    first, rest = d.split("\n", 1)
+    first = first.strip()
+    rest2 = rest.strip()
+    if 0 < len(first) <= 90 and not first.endswith((".", "!", "?")):
+        # if rest starts with a typical Romanian sentence, drop first line
+        if re.match(r"^(Fabricat|Realizat|Conceput|Rucsacul|Acest|Aceasta|Cu)\b", rest2, flags=re.IGNORECASE):
+            return rest2
+    return d
 
-def extract_section(text: str, headers: list[str]) -> str:
-    t = normalize(text)
-    lines = t.split("\n")
-    idx=None
-    for i,ln in enumerate(lines):
-        if any(header_match(ln,h) for h in headers):
-            idx=i; break
-    if idx is None:
-        return ""
-    start=idx+1
-    stop_headers = {"informații de bază","informatii de baza","descriere","basic information","description",
-                    "technical information","additional info","product specific details","key features","key features:"}
-    end=len(lines)
-    for j in range(start,len(lines)):
-        s=lines[j].strip()
-        if not s:
-            continue
-        if s.lower().rstrip(":") in stop_headers and s.lower().rstrip(":") not in {h.lower().rstrip(":") for h in headers}:
-            end=j; break
-    return "\n".join(lines[start:end]).strip()
+KNOWN_KEYS = {
+    "brand","material","colour","color","length","width","height","weight","country of origin","engraving color",
+    "marca","material","culoare","lungime","latime","inaltime","greutate","tara de origine","culoare de gravare"
+}
+KNOWN_KEYS_NORM = {norm_key(x) for x in KNOWN_KEYS}
+
+def parse_description_and_tail(raw_lines: list[str]) -> tuple[str, list[str]]:
+    """
+    Input starts with 'Description' or 'Descriere'.
+    Returns (description_text, tail_lines_starting_with_first_key)
+    """
+    lines = [ln.rstrip() for ln in raw_lines]
+    # skip header line
+    i = 1
+    desc_lines = []
+    while i < len(lines):
+        s = lines[i].strip()
+        if s and norm_key(s) in KNOWN_KEYS_NORM:
+            break
+        desc_lines.append(lines[i])
+        i += 1
+    description = "\n".join(desc_lines).strip()
+    tail = [ln.strip() for ln in lines[i:] if ln.strip()]
+    return description, tail
 
 def parse_vertical_kvs(lines: list[str]):
     out=[]
@@ -143,62 +162,45 @@ def parse_vertical_kvs(lines: list[str]):
             i += 2
         else:
             i += 1
-    # last-wins
     dedup={}
     for k,v in out:
         dedup[norm_key(k)] = (k,v)
     return list(dedup.values())
 
-def build_output(description: str, kv_lines: list[str], show_caracteristici: bool) -> str:
+def build_output(description: str, kv_lines: list[str]) -> str:
     parts=[]
     if description:
         parts.append("Descriere:")
         parts.append(description.strip())
         parts.append("")
-    if kv_lines:
-        if show_caracteristici:
-            parts.append("Caracteristici:")
-        parts.extend([ln.strip() for ln in kv_lines if ln.strip()])
+    parts.extend([ln.strip() for ln in kv_lines if ln.strip()])
     return ("\n".join(parts).strip()+"\n") if parts else ""
 
 def process_input(raw_text: str):
     raw = normalize(raw_text).strip()
     if not raw:
         return "", "unknown"
-    lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
+    raw_lines = [ln.rstrip() for ln in raw.split("\n") if ln.strip()]
 
-    description=""
-    kv_pairs=[]
-    show_caracteristici=True
-    detected="unknown"
+    description = ""
+    kv_pairs = []
+    detected = "unknown"
 
-    if lines and lines[0].lower() in {"description","descriere"}:
-        description = extract_section(raw, ["Description","Descriere"])
-
-        known_keys = {"brand","material","colour","color","length","width","height","weight","country of origin","engraving color",
-                      "marca","material","culoare","lungime","latime","inaltime","greutate","tara de origine","culoare de gravare"}
-        # find first occurrence of a known key after description
-        idx=0
-        if lines and lines[0].lower()=="description":
-            idx=1
-        while idx < len(lines) and norm_key(lines[idx]) not in {norm_key(x) for x in known_keys}:
-            idx += 1
-        tail = lines[idx:]
+    if raw_lines and norm_key(raw_lines[0]) in {norm_key("description"), norm_key("descriere")}:
+        description, tail = parse_description_and_tail(raw_lines)
         kvs = parse_vertical_kvs(tail)
-        if kvs:
-            show_caracteristici = False  # plain list, no "Caracteristici:"
         for k,v in kvs:
             k_ro = map_key_to_ro(k)
             if is_banned_key(k) or is_banned_key(k_ro):
                 continue
             kv_pairs.append((k_ro, v))
     else:
-        # fallback: whole text is description
         description = raw
 
     if description:
         description, detected = maybe_translate_to_ro(description)
         description = polish_ro(description)
+        description = drop_hallucinated_title(description)
 
     kv_lines=[]
     detected2="unknown"
@@ -213,7 +215,7 @@ def process_input(raw_text: str):
     if detected=="unknown":
         detected=detected2
 
-    out = build_output(description, kv_lines, show_caracteristici)
+    out = build_output(description, kv_lines)
     out = remove_diacritics(out)
     return out, detected
 
