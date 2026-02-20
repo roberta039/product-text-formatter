@@ -44,14 +44,15 @@ BANNED_KEYS = {
     "marca",
     "marcă",
     "numarul paginii din catalog",
-    "numarul paginii din catalog:",
     "cod de bare",
     "nume in catalog",
-    "catalogue", "catalog",
+    "pachet",
     # EN
     "country of origin",
     "catalogue (title / chapter / page)",
     "catalog (title / chapter / page)",
+    "catalogue",
+    "catalog",
     "code",
     "brand",
     "catalogue page number",
@@ -59,7 +60,6 @@ BANNED_KEYS = {
     "bar code",
     "barcode",
     "package",
-    "pachet",
 }
 
 def is_banned_key(key: str) -> bool:
@@ -67,7 +67,6 @@ def is_banned_key(key: str) -> bool:
     banned_norm = {norm_key(x) for x in BANNED_KEYS}
     if k in banned_norm:
         return True
-    # catch variants
     banned_sub = [
         "tara de origine", "country of origin",
         "catalogue", "catalog",
@@ -76,15 +75,43 @@ def is_banned_key(key: str) -> bool:
         "cod de bare", "bar code", "barcode",
     ]
     return any(s in k for s in banned_sub) or k in {
-        norm_key("cod"), norm_key("code"), norm_key("model"), norm_key("marca"), norm_key("brand")
+        norm_key("cod"), norm_key("code"), norm_key("model"), norm_key("marca"), norm_key("brand"), norm_key("package"), norm_key("pachet")
     }
 
-# ----------------- language -----------------
+# Map common keys to Romanian (for nicer output)
+KEY_MAP = {
+    "color": "Culoare",
+    "culori": "Culoare",
+    "culoare/culori": "Culoare",
+    "net weight": "Greutate neta",
+    "gross weight": "Greutate bruta",
+    "weight": "Greutate",
+    "material": "Material",
+    "materials": "Material",
+    "material(e)": "Material",
+    "dimension": "Dimensiuni",
+    "dimensions": "Dimensiuni",
+    "dimenzija": "Dimensiuni",
+    "size": "Dimensiuni",
+    "capacity": "Capacitate",
+    "volume": "Capacitate",
+    "performance": "Performanta",
+    "additional equipment": "Echipamente suplimentare",
+    "product weight": "Greutatea produsului",
+    "individual product weight": "Greutatea produsului individual",
+}
+
+def map_key_to_ro(key: str) -> str:
+    k = norm_key(key)
+    return KEY_MAP.get(k, key.strip())
+
+# ----------------- language (better translation) -----------------
 @st.cache_data(show_spinner=False)
 def detect_lang_safe(text: str) -> str:
     try:
         sample = re.sub(r"\s+", " ", (text or "")).strip()
-        if len(sample) < 20:
+        # langdetect is unreliable on very short strings
+        if len(sample) < 35:
             return "unknown"
         return detect(sample)
     except LangDetectException:
@@ -99,15 +126,54 @@ def translate_to_ro(text: str) -> str:
     except Exception:
         return text
 
+EN_HINT_WORDS = {
+    "pocket", "zip", "zippers", "connector", "lock", "waterproof", "nylon", "gift", "packaging",
+    "front", "hidden", "back", "laptop", "tablet", "business", "executive", "anti-theft", "type-c", "usb",
+    "black", "grey", "blue", "red", "green"
+}
+
+def looks_english_or_foreign_short(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    low = remove_diacritics(t).lower()
+    # any typical English keyword
+    if any(re.search(rf"\b{re.escape(w)}\b", low) for w in EN_HINT_WORDS):
+        return True
+    # has only ASCII letters and spaces/punct and no Romanian stopwords -> likely EN
+    if re.fullmatch(r"[A-Za-z0-9 \-–—,:;\"'()\[\]/\.]+", t) and not re.search(r"\b(si|sau|pentru|cu|din|este)\b", low):
+        return True
+    return False
+
 def maybe_translate_to_ro(text: str) -> tuple[str, str]:
-    lang = detect_lang_safe(text)
+    """
+    Translate to Romanian when text is non-RO OR when it's short/unknown but looks English/foreign.
+    """
+    t = text or ""
+    lang = detect_lang_safe(t)
     if lang not in ("ro", "unknown"):
-        return translate_to_ro(text), lang
-    return text, lang
+        return translate_to_ro(t), lang
+    if lang == "unknown" and looks_english_or_foreign_short(t):
+        return translate_to_ro(t), "auto"
+    return t, lang
+
+def polish_ro_phrasing(text: str) -> str:
+    """
+    Small post-edits to make output more natural and consistent.
+    """
+    t = text or ""
+    # normalize quotes
+    t = t.replace("”", '"').replace("“", '"').replace("„", '"')
+    # common wording tweaks
+    t = re.sub(r"\brucsac de afaceri\b", "rucsac business", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bexecutiv\b", "executiv", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bport de tip c\b", "port Type-C", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bport type-c\b", "port Type-C", t, flags=re.IGNORECASE)
+    t = re.sub(r"\banti[- ]theft\b", "antifurt", t, flags=re.IGNORECASE)
+    return t
 
 # ----------------- parsing -----------------
 def header_match(line: str, header: str) -> bool:
-    # compare ignoring trailing ":" and spaces
     a = line.strip().lower().rstrip(":").strip()
     b = header.strip().lower().rstrip(":").strip()
     return a == b
@@ -169,7 +235,6 @@ def parse_tab_kvs(text: str):
         if not ln:
             continue
 
-        # ignore headings
         if any(header_match(ln, h) for h in [
             "Product specific details",
             "Informatii de baza", "Informații de bază",
@@ -217,6 +282,24 @@ def build_formatted(title: str, description: str, characteristics_lines: list[st
             parts.append(ln)
     return ("\n".join(parts).strip() + "\n") if parts else ""
 
+def translate_characteristics_lines(lines: list[str]) -> tuple[list[str], str]:
+    detected_any = "unknown"
+    out = []
+    for line in lines:
+        if ":" in line:
+            k, v = line.split(":", 1)
+            k_ro = map_key_to_ro(k)
+            v2, lang2 = maybe_translate_to_ro(v.strip())
+            if detected_any == "unknown":
+                detected_any = lang2
+            out.append(f"{k_ro}: {polish_ro_phrasing(v2)}")
+        else:
+            l2, lang2 = maybe_translate_to_ro(line)
+            if detected_any == "unknown":
+                detected_any = lang2
+            out.append(polish_ro_phrasing(l2))
+    return out, detected_any
+
 def process_input(raw_text: str) -> tuple[str, str]:
     raw = normalize(raw_text).strip()
     if not raw:
@@ -232,8 +315,8 @@ def process_input(raw_text: str) -> tuple[str, str]:
 
     if is_tabular:
         kvs = [(k, v) for (k, v) in parse_tab_kvs(raw) if not is_banned_key(k)]
-
         data = {norm_key(k): v for k, v in kvs}
+
         title = data.get(norm_key("Nume produs"), "") or data.get(norm_key("Product name"), "")
         description = data.get(norm_key("Descriere"), "") or data.get(norm_key("Description"), "")
 
@@ -244,21 +327,11 @@ def process_input(raw_text: str) -> tuple[str, str]:
             characteristics.append(f"{k}: {v}")
 
         description, detected_lang_any = maybe_translate_to_ro(description)
+        description = polish_ro_phrasing(description)
 
-        translated = []
-        for line in characteristics:
-            if ":" in line:
-                k, v = line.split(":", 1)
-                v2, lang2 = maybe_translate_to_ro(v.strip())
-                if detected_lang_any == "unknown":
-                    detected_lang_any = lang2
-                translated.append(f"{k.strip()}: {v2}")
-            else:
-                l2, lang2 = maybe_translate_to_ro(line)
-                if detected_lang_any == "unknown":
-                    detected_lang_any = lang2
-                translated.append(l2)
-        characteristics = translated
+        characteristics, detected_lang_any2 = translate_characteristics_lines(characteristics)
+        if detected_lang_any == "unknown":
+            detected_lang_any = detected_lang_any2
 
     else:
         basic = extract_section(raw, ["Informații de bază", "Informatii de baza", "Basic Information"])
@@ -266,26 +339,23 @@ def process_input(raw_text: str) -> tuple[str, str]:
         keyf = extract_section(raw, ["Caracteristici cheie", "Key features", "Key features:"])
 
         kvs_basic = [(k, v) for (k, v) in parse_key_values_colon(basic) if not is_banned_key(k)]
-
-        # title: try to find an explicit name line if present (optional)
-        m = re.search(r"(?im)^(nume produs|product name)\s*:\s*(.+)$", raw)
-        if m:
-            title = m.group(2).strip()
-
         for k, v in kvs_basic:
             characteristics.append(f"{k}: {v}")
 
-        for it in parse_bullets(keyf):
-            it2, lang2 = maybe_translate_to_ro(it)
-            if detected_lang_any == "unknown":
-                detected_lang_any = lang2
-            characteristics.append(it2)
+        # bullet items
+        bullets = parse_bullets(keyf)
+        characteristics.extend(bullets)
 
         description, detected_lang_any = maybe_translate_to_ro(description)
+        description = polish_ro_phrasing(description)
+
+        characteristics, detected_lang_any2 = translate_characteristics_lines(characteristics)
+        if detected_lang_any == "unknown":
+            detected_lang_any = detected_lang_any2
 
     formatted = build_formatted(title, description, characteristics)
 
-    # final output: always no diacritics
+    # final: always without diacritics (requested)
     formatted = remove_diacritics(formatted)
     return formatted, detected_lang_any
 
@@ -306,7 +376,7 @@ def do_reset():
     st.session_state["detected_lang"] = "unknown"
 
 with st.form("formatter_form"):
-    raw = st.text_area(
+    st.text_area(
         "Text brut (accepta: sectiuni sau tabel cu TAB-uri)",
         height=320,
         key="raw_text",
